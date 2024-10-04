@@ -2,8 +2,8 @@
  * TASK: Addition of two vectors
  * NOTE: Implemented and tested on Windows 10 with NVIDIA GTX 1050 (laptop) card
  * RESULTS: (For vectors with the size = 100'000'000 with -O3 compilation flag)
- *  - CPU addition: ~110 ms
- *  - GPU addition: ~13 ms
+ *  - CPU addition: ~113 ms
+ *  - GPU addition: ~12 ms
  *  - GPU data preparation overhead (allocation and host to device copy): ~700ms
  */
 
@@ -16,13 +16,13 @@
 
 constexpr long VEC_SIZE = 100'000'000;
 constexpr int32_t ALIGNMENT = 16;
-constexpr float VEC_A_OFFSET = 0.2f;
+constexpr float VEC_A_OFFSET = 0.5f;
 constexpr float VEC_B_OFFSET = 1.3f;
 constexpr bool PRINT_VEC = false;
 
 // CUDA specific
-constexpr int32_t CUDA_BLOCK_SIZE = 256; // amount of threads per threads block
-constexpr int32_t CUDA_BLOCKS_PER_GRID = (VEC_SIZE + CUDA_BLOCK_SIZE - 1) / CUDA_BLOCK_SIZE; // amount of thread block
+constexpr int32_t CUDA_BLOCK_SIZE = 256;                                               // amount of threads per thread block
+constexpr int32_t CUDA_GRID_SIZE = (VEC_SIZE + CUDA_BLOCK_SIZE - 1) / CUDA_BLOCK_SIZE; // amount of thread blocks per grid
 
 // Helpers
 void printVec(float* pVec);
@@ -180,9 +180,10 @@ void add(float* pVecA, float* pVecB, float* pVecRes)
 __global__ void addKernel(float* pVecA, float* pVecB, float* pVecRes)
 {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
-    const int stride = blockDim.x * gridDim.x;
-    for (int i = index; i < VEC_SIZE; i += stride)
-        pVecRes[i] = pVecA[i] + pVecB[i];
+    if (index < VEC_SIZE)
+    {
+        pVecRes[index] = pVecA[index] + pVecB[index];
+    }
 }
 
 void addWithCuda(float* pDevVecA, float* pDevVecB, float* pDevVecRes, float* pVecRes)
@@ -193,7 +194,7 @@ void addWithCuda(float* pDevVecA, float* pDevVecB, float* pDevVecRes, float* pVe
 
     cudaEventRecord(startKernelEvent, 0);
 
-    addKernel<<<CUDA_BLOCKS_PER_GRID, CUDA_BLOCK_SIZE>>>(pDevVecA, pDevVecB, pDevVecRes);
+    addKernel<<<CUDA_GRID_SIZE, CUDA_BLOCK_SIZE>>>(pDevVecA, pDevVecB, pDevVecRes);
 
     // Check for any errors launching the kernel
     cudaError_t cudaStatus = cudaGetLastError();

@@ -29,8 +29,8 @@ constexpr bool PRINT_MAT = false;
 // CUDA specific
 constexpr int32_t TILE_WIDTH = 16;                                          // size of the matrix tile 16x16
 constexpr int32_t TILES_AMOUNT = (MAT_DIM_M + TILE_WIDTH - 1) / TILE_WIDTH; // amount of tiles to cover all matrix elements
-const dim3 CUDA_THREADS_PER_BLOCK(TILE_WIDTH, TILE_WIDTH);                   // 256 threads per block. Should have the same dimension as matrix tile for efficient processing
-const dim3 CUDA_BLOCKS_PER_GRID((MAT_DIM_K + CUDA_THREADS_PER_BLOCK.x - 1) / CUDA_THREADS_PER_BLOCK.x, (MAT_DIM_N + CUDA_THREADS_PER_BLOCK.y - 1) / CUDA_THREADS_PER_BLOCK.y); // blocks to cover the matrix
+const dim3 CUDA_BLOCK_SIZE(TILE_WIDTH, TILE_WIDTH);                         // 256 threads per block. Should have the same dimension as matrix tile for efficient processing
+const dim3 CUDA_GRID_SIZE((MAT_DIM_K + CUDA_BLOCK_SIZE.x - 1) / CUDA_BLOCK_SIZE.x, (MAT_DIM_N + CUDA_BLOCK_SIZE.y - 1) / CUDA_BLOCK_SIZE.y); // blocks to cover the matrix
 
 // Helpers
 void initData(float* pMatA, float* pMatB, float* pMatRes);
@@ -275,7 +275,7 @@ void matMulCuda(float* pDevMatA, float* pDevMatB, float* pDevMatRes, float* pMat
     cudaEventCreate(&stopKernelEvent);
 
     cudaEventRecord(startKernelEvent, 0);
-    matMulTiledKernel<<<CUDA_BLOCKS_PER_GRID, CUDA_THREADS_PER_BLOCK>>>(pDevMatA, pDevMatB, pDevMatRes, MAT_DIM_N, MAT_DIM_M, MAT_DIM_K, TILES_AMOUNT);
+    matMulTiledKernel<<<CUDA_GRID_SIZE, CUDA_BLOCK_SIZE>>>(pDevMatA, pDevMatB, pDevMatRes, MAT_DIM_N, MAT_DIM_M, MAT_DIM_K, TILES_AMOUNT);
 
     // Check for any errors launching the kernel
     cudaError_t cudaStatus = cudaGetLastError();
