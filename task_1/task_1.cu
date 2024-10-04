@@ -1,8 +1,10 @@
 ﻿/**
  * TASK: Addition of two vectors
+ * NOTE: Implemented and tested on Windows 10 with NVIDIA GTX 1050 (laptop) card
  * RESULTS: (For vectors with the size = 100'000'000 with -O3 compilation flag)
  *  - CPU addition: ~110 ms
  *  - GPU addition: ~13 ms
+ *  - GPU data preparation overhead (allocation and host to device copy): ~700ms
  */
 
 #include "cuda_runtime.h"
@@ -12,15 +14,17 @@
 #include <iostream>
 #include <chrono>
 
-constexpr int32_t VEC_SIZE = 100'000'000;
+constexpr long VEC_SIZE = 100'000'000;
 constexpr int32_t ALIGNMENT = 16;
 constexpr float VEC_A_OFFSET = 0.2f;
 constexpr float VEC_B_OFFSET = 1.3f;
 constexpr bool PRINT_VEC = false;
 
-constexpr int32_t CUDA_BLOCK_SIZE = 512;                                                     // amount of threads per threads block
+// CUDA specific
+constexpr int32_t CUDA_BLOCK_SIZE = 256; // amount of threads per threads block
 constexpr int32_t CUDA_BLOCKS_PER_GRID = (VEC_SIZE + CUDA_BLOCK_SIZE - 1) / CUDA_BLOCK_SIZE; // amount of thread block
 
+// Helpers
 void printVec(float* pVec);
 void initData(float* pVecA, float* pVecB);
 void cleanup(float* pVecA, float* pVecB, float* pVecRes, float* pDevVecA, float* pDevVecB, float* pDevVecRes);
@@ -75,6 +79,8 @@ int main()
     float* pDevVecB = nullptr;
     float* pDevVecRes = nullptr;
 
+    const auto startTimePoint = std::chrono::high_resolution_clock::now();
+
     // Allocate GPU buffers for three vectors
     cudaError_t cudaStatus = cudaMalloc(&pDevVecA, VEC_SIZE * sizeof(float));
     if (cudaStatus != cudaSuccess) {
@@ -111,6 +117,11 @@ int main()
         cleanup(pVecA, pVecB, pVecRes, pDevVecA, pDevVecB, pDevVecRes);
         return 1;
     }
+    const auto endTimePoint = std::chrono::high_resolution_clock::now();
+
+    std::cout << "===== GPU Addition =====\n";
+    const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTimePoint - startTimePoint);
+    std::cout << "GPU data preparation (buffers allocation and host to device data copy) time: " << duration.count() << " ms.\n";
 
     addWithCuda(pDevVecA, pDevVecB, pDevVecRes, pVecRes);
 
@@ -176,9 +187,12 @@ __global__ void addKernel(float* pVecA, float* pVecB, float* pVecRes)
 
 void addWithCuda(float* pDevVecA, float* pDevVecB, float* pDevVecRes, float* pVecRes)
 {
-    std::cout << "===== GPU Addition =====\n";
+    cudaEvent_t startKernelEvent, stopKernelEvent; // events to measure kernel execution time
+    cudaEventCreate(&startKernelEvent);
+    cudaEventCreate(&stopKernelEvent);
 
-    const auto startTimePoint = std::chrono::high_resolution_clock::now();
+    cudaEventRecord(startKernelEvent, 0);
+
     addKernel<<<CUDA_BLOCKS_PER_GRID, CUDA_BLOCK_SIZE>>>(pDevVecA, pDevVecB, pDevVecRes);
 
     // Check for any errors launching the kernel
@@ -187,6 +201,14 @@ void addWithCuda(float* pDevVecA, float* pDevVecB, float* pDevVecRes, float* pVe
         std::cout << "addKernel launch failed:" << cudaGetErrorString(cudaStatus) << std::endl;
         return;
     }
+
+    cudaEventRecord(stopKernelEvent, 0);
+    cudaEventSynchronize(stopKernelEvent);
+
+    float kernelTimeMs = 0.0f;
+    cudaEventElapsedTime(&kernelTimeMs, startKernelEvent, stopKernelEvent);
+    cudaEventDestroy(startKernelEvent);
+    cudaEventDestroy(stopKernelEvent);
 
     // cudaDeviceSynchronize waits for the kernel to finish
     cudaStatus = cudaDeviceSynchronize();
@@ -210,6 +232,5 @@ void addWithCuda(float* pDevVecA, float* pDevVecB, float* pDevVecRes, float* pVe
         printVec(pVecRes);
     }
 
-    const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTimePoint - startTimePoint);
-    std::cout << "Execution time: " << duration.count() << " ms.\n";
+    std::cout << "Execution time: " << kernelTimeMs << " ms.\n";
 }

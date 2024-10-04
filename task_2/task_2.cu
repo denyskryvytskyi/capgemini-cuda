@@ -1,12 +1,11 @@
 /**
  * TASK: Matrix Multiplication Using CUDA
+ * NOTE: Implemented and tested on Windows 10 with NVIDIA GTX 1050 (laptop) card
  * RESULTS: (for matrices A(1500; 2000); B(2000; 3000) and result matrix (1500;3000) with -O3 compilation flag)
  *  - CPU multiplication: ~4000 ms
  *  - GPU multiplication (simple kernel matMulKernel): ~200 ms (~20 times faster)
- *  - GPU multiplication (tiled matrix kernel matMulTiledKernel): ~88 ms (~45 times faster)
- * TODO:
- *  - tiled matrices
- *  - transpose matrix B for sequential access
+ *  - GPU multiplication (tiled matrix kernel matMulTiledKernel): ~87 ms (~45 times faster)
+ *  - GPU data preparation (time to allocate GPU buffers and host to device data copy): ~380 ms
  **/
 
 #include <cuda_runtime.h>
@@ -85,12 +84,15 @@ int main()
     resetRes(pMatRes);
     matMul(pMatA, pMatB, pMatRes);
 
+    std::cout << "===== GPU Matrix Multiplication =====\n";
     resetRes(pMatRes);
 
     // CUDA buffers
     float* pDevMatA = nullptr;
     float* pDevMatB = nullptr;
     float* pDevMatRes = nullptr;
+
+    const auto startTimePoint = std::chrono::high_resolution_clock::now();
 
     // Allocate GPU buffers for three vectors
     cudaError_t cudaStatus = cudaMalloc((void**)&pDevMatA, MAT_A_SIZE * sizeof(float));
@@ -128,6 +130,10 @@ int main()
         cleanup(pMatA, pMatB, pMatRes, pDevMatA, pDevMatB, pDevMatRes);
         return 1;
     }
+    const auto endTimePoint = std::chrono::high_resolution_clock::now();
+
+    const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTimePoint - startTimePoint);
+    std::cout << "GPU data preparation (buffers allocation and host to device data copy) time: " << duration.count() << " ms.\n";
 
     matMulCuda(pDevMatA, pDevMatB, pDevMatRes, pMatRes);
 
@@ -264,9 +270,11 @@ __global__ void matMulTiledKernel(float* pMatA, float* pMatB, float* pMatRes, in
 
 void matMulCuda(float* pDevMatA, float* pDevMatB, float* pDevMatRes, float* pMatRes)
 {
-    std::cout << "===== GPU Matrix Multiplication =====\n";
+    cudaEvent_t startKernelEvent, stopKernelEvent; // events to measure kernel execution time
+    cudaEventCreate(&startKernelEvent);
+    cudaEventCreate(&stopKernelEvent);
 
-    const auto startTimePoint = std::chrono::high_resolution_clock::now();
+    cudaEventRecord(startKernelEvent, 0);
     matMulTiledKernel<<<CUDA_BLOCKS_PER_GRID, CUDA_THREADS_PER_BLOCK>>>(pDevMatA, pDevMatB, pDevMatRes, MAT_DIM_N, MAT_DIM_M, MAT_DIM_K, TILES_AMOUNT);
 
     // Check for any errors launching the kernel
@@ -276,8 +284,15 @@ void matMulCuda(float* pDevMatA, float* pDevMatB, float* pDevMatRes, float* pMat
         return;
     }
 
+    cudaEventRecord(stopKernelEvent, 0);
+    cudaEventSynchronize(stopKernelEvent);
+
+    float kernelTimeMs = 0.0f;
+    cudaEventElapsedTime(&kernelTimeMs, startKernelEvent, stopKernelEvent);
+    cudaEventDestroy(startKernelEvent);
+    cudaEventDestroy(stopKernelEvent);
+
     cudaStatus = cudaDeviceSynchronize();
-    const auto endTimePoint = std::chrono::high_resolution_clock::now();
 
     // Any errors encountered during the launch
     if (cudaStatus != cudaSuccess) {
@@ -297,6 +312,5 @@ void matMulCuda(float* pDevMatA, float* pDevMatB, float* pDevMatRes, float* pMat
         printMat(pMatRes, MAT_DIM_N, MAT_DIM_K);
     }
 
-    const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTimePoint - startTimePoint);
-    std::cout << "Execution time: " << duration.count() << " ms.\n";
+    std::cout << "Execution time (kernel): " << kernelTimeMs << " ms.\n";
 }
