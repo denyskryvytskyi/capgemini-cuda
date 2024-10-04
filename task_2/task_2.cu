@@ -1,9 +1,9 @@
 /**
  * TASK: Matrix Multiplication Using CUDA
  * RESULTS: (for matrices A(1500; 2000); B(2000; 3000) and result matrix (1500;3000) with -O3 compilation flag)
- *  - CPU multiplication: ~4300 ms
- *  - GPU multiplication (simple kernel matMulKernel): ~200 ms (~21 times faster)
- *  - GPU multiplication (tiled matrix kernel matMulTiledKernel): ~88 ms (~48 times faster)
+ *  - CPU multiplication: ~4000 ms
+ *  - GPU multiplication (simple kernel matMulKernel): ~200 ms (~20 times faster)
+ *  - GPU multiplication (tiled matrix kernel matMulTiledKernel): ~88 ms (~45 times faster)
  * TODO:
  *  - tiled matrices
  *  - transpose matrix B for sequential access
@@ -12,9 +12,9 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 
-#include <chrono>
-#include <iostream>
 #include <malloc.h>
+#include <iostream>
+#include <chrono>
 
 constexpr int32_t MAT_DIM_N = 1500; // rows of the matrix A
 constexpr int32_t MAT_DIM_M = 2000; // cols of the matrix A and rows of the matrix B
@@ -23,20 +23,21 @@ constexpr int32_t MAT_A_SIZE = MAT_DIM_N * MAT_DIM_M;
 constexpr int32_t MAT_B_SIZE = MAT_DIM_M * MAT_DIM_K;
 constexpr int32_t MAT_RES_SIZE = MAT_DIM_N * MAT_DIM_K;
 constexpr int32_t ALIGNMENT = 16;
-constexpr bool PRINT_MAT = false;
 constexpr float MAT_A_OFFSET = 0.5f;
 constexpr float MAT_B_OFFSET = 1.3f;
+constexpr bool PRINT_MAT = false;
 
 // CUDA specific
-constexpr int TILE_WIDTH = 16;        // size of the matrix tile 16x16
-const dim3 THREADS_PER_BLOCK(16, 16); // 256 threads per block
-const dim3 BLOCKS_PER_GRID((MAT_DIM_K + THREADS_PER_BLOCK.x - 1) / THREADS_PER_BLOCK.x, (MAT_DIM_N + THREADS_PER_BLOCK.x - 1) / THREADS_PER_BLOCK.x); // blocks to cover the matrix
+constexpr int32_t TILE_WIDTH = 16;                                          // size of the matrix tile 16x16
+constexpr int32_t TILES_AMOUNT = (MAT_DIM_M + TILE_WIDTH - 1) / TILE_WIDTH; // amount of tiles to cover all matrix elements
+const dim3 CUDA_THREADS_PER_BLOCK(TILE_WIDTH, TILE_WIDTH);                   // 256 threads per block. Should have the same dimension as matrix tile for efficient processing
+const dim3 CUDA_BLOCKS_PER_GRID((MAT_DIM_K + CUDA_THREADS_PER_BLOCK.x - 1) / CUDA_THREADS_PER_BLOCK.x, (MAT_DIM_N + CUDA_THREADS_PER_BLOCK.y - 1) / CUDA_THREADS_PER_BLOCK.y); // blocks to cover the matrix
 
+// Helpers
 void initData(float* pMatA, float* pMatB, float* pMatRes);
 void resetRes(float* pMatRes);
 void printMat(float* pMat, int32_t rows, int32_t cols);
-
-void transposeMat(float* pMatB, float* pDevMatB);
+void cleanup(float* pMatA, float* pMatB, float* pMatRes, float* pDevMatA, float* pDevMatB, float* pDevMatRes);
 void matMul(float* pMatA, float* pMatB, float* pMatRes);
 void matMulCuda(float* pDevMatA, float* pDevMatB, float* pDevMatRes, float* pMatRes);
 
@@ -89,36 +90,27 @@ int main()
     // CUDA buffers
     float* pDevMatA = nullptr;
     float* pDevMatB = nullptr;
-    float* pDevMatB_T = nullptr;
     float* pDevMatRes = nullptr;
 
     // Allocate GPU buffers for three vectors
     cudaError_t cudaStatus = cudaMalloc((void**)&pDevMatA, MAT_A_SIZE * sizeof(float));
     if (cudaStatus != cudaSuccess) {
         std::cout << "cudaMalloc failed for vector A!\n";
+        cleanup(pMatA, pMatB, pMatRes, pDevMatA, pDevMatB, pDevMatRes);
         return 1;
     }
 
     cudaStatus = cudaMalloc((void**)&pDevMatB, MAT_B_SIZE * sizeof(float));
     if (cudaStatus != cudaSuccess) {
         std::cout << "cudaMalloc failed for vector B!\n";
-        cudaFree(pDevMatA);
+        cleanup(pMatA, pMatB, pMatRes, pDevMatA, pDevMatB, pDevMatRes);
         return 1;
     }
 
     cudaStatus = cudaMalloc((void**)&pDevMatRes, MAT_RES_SIZE * sizeof(float));
     if (cudaStatus != cudaSuccess) {
         std::cout << "cudaMalloc failed for result vector!\n";
-        cudaFree(pDevMatA);
-        cudaFree(pDevMatB);
-        return 1;
-    }
-
-    //transpose
-    cudaStatus = cudaMalloc((void**)&pDevMatB_T, MAT_B_SIZE * sizeof(float));
-    if (cudaStatus != cudaSuccess) {
-        std::cout << "cudaMalloc failed for vector B!\n";
-        cudaFree(pDevMatA);
+        cleanup(pMatA, pMatB, pMatRes, pDevMatA, pDevMatB, pDevMatRes);
         return 1;
     }
 
@@ -126,25 +118,20 @@ int main()
     cudaStatus = cudaMemcpy(pDevMatA, pMatA, MAT_A_SIZE * sizeof(float), cudaMemcpyHostToDevice);
     if (cudaStatus != cudaSuccess) {
         std::cout << "cudaMemcpy failed for vector A!\n";
+        cleanup(pMatA, pMatB, pMatRes, pDevMatA, pDevMatB, pDevMatRes);
+        return 1;
     }
 
     cudaStatus = cudaMemcpy(pDevMatB, pMatB, MAT_B_SIZE * sizeof(float), cudaMemcpyHostToDevice);
     if (cudaStatus != cudaSuccess) {
         std::cout << "cudaMemcpy failed for vector B!\n";
+        cleanup(pMatA, pMatB, pMatRes, pDevMatA, pDevMatB, pDevMatRes);
+        return 1;
     }
-    
-    std::cout << "===== GPU Matrix Multiplication =====\n";
-    //transposeMat(pDevMatB, pDevMatB_T);
+
     matMulCuda(pDevMatA, pDevMatB, pDevMatRes, pMatRes);
 
-    cudaFree(pDevMatRes);
-    cudaFree(pDevMatB);
-    cudaFree(pDevMatB_T);
-    cudaFree(pDevMatA);
-
-    _aligned_free(pMatRes);
-    _aligned_free(pMatB);
-    _aligned_free(pMatA);
+    cleanup(pMatA, pMatB, pMatRes, pDevMatA, pDevMatB, pDevMatRes);
 
     return 0;
 }
@@ -176,6 +163,16 @@ void printMat(float* pMat, int32_t rows, int32_t cols)
     std::cout << std::endl;
 }
 
+void cleanup(float* pMatA, float* pMatB, float* pMatRes, float* pDevMatA, float* pDevMatB, float* pDevMatRes)
+{
+    cudaFree(pDevMatRes);
+    cudaFree(pDevMatB);
+    cudaFree(pDevMatA);
+    _aligned_free(pMatRes);
+    _aligned_free(pMatB);
+    _aligned_free(pMatA);
+}
+
 
 void matMul(float* pMatA, float* pMatB, float* pMatRes)
 {
@@ -201,58 +198,48 @@ void matMul(float* pMatA, float* pMatB, float* pMatRes)
     std::cout << "Execution time: " << duration.count() << " ms.\n";
 }
 
-__global__ void transposeKernel(float* B, float* B_T, int MAT_DIM_M, int MAT_DIM_K)
-{
-    const int row = blockIdx.x * blockDim.x + threadIdx.x;
-    const int col = blockIdx.y * blockDim.y + threadIdx.y;
-
-    if (row < MAT_DIM_M && col < MAT_DIM_K) {
-        B_T[col * MAT_DIM_M + row] = B[row * MAT_DIM_K + col];
-    }
-}
-
-__global__ void matMulKernel(float* pMatA, float* pMatB, float* pMatRes, int MAT_DIM_N, int MAT_DIM_M, int MAT_DIM_K)
+__global__ void matMulKernel(float* pMatA, float* pMatB, float* pMatRes, int matDimN, int matDimM, int matDimK)
 {
     const int row = blockIdx.y * blockDim.y + threadIdx.y;
     const int col = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (row < MAT_DIM_N && col < MAT_DIM_K) {           // bounding checks
+    if (row < matDimN && col < matDimK) {           // bounding checks
         float sum = 0.0f;
-        for (int i = 0; i < MAT_DIM_M; ++i) {
-            sum += pMatA[row * MAT_DIM_M + i] * pMatB[i * MAT_DIM_K + col];
+        for (int i = 0; i < matDimM; ++i) {
+            sum += pMatA[row * matDimM + i] * pMatB[i * matDimK + col];
         }
-        pMatRes[row * MAT_DIM_K + col] = sum;
+        pMatRes[row * matDimK + col] = sum;
     }
 }
 
-__global__ void matMulTiledKernel(float* pMatA, float* pMatB, float* pMatRes, int MAT_DIM_N, int MAT_DIM_M, int MAT_DIM_K)
+__global__ void matMulTiledKernel(float* pMatA, float* pMatB, float* pMatRes, int matDimN, int matDimM, int matDimK, int tilesAmount)
 {
     // Allocate shared memory for sub-matrices A and B tiles for faster access
+    // Shared for all threads in one thread block
     __shared__ float sharedMatA[TILE_WIDTH][TILE_WIDTH];
     __shared__ float sharedMatB[TILE_WIDTH][TILE_WIDTH];
 
-    // Calculate thread row and column within the output matrix C
+    // Calculate element row and column within the output result matrix to be processed by thread
     const int row = blockIdx.y * TILE_WIDTH + threadIdx.y;
     const int col = blockIdx.x * TILE_WIDTH + threadIdx.x;
-
-    const int amountOfTiles = (MAT_DIM_M + TILE_WIDTH - 1) / TILE_WIDTH;
 
     // Accumulator for the result element
     float elementValue = 0.0f;
 
-    // Loop over tiles of matrices A and B
-    for (int t = 0; t < amountOfTiles; ++t) {
+    // One thread block calculates result values for one tile of the result matrix (256 threads in parallel)
+    // Loop over tiles of matrices A and B (one tile per one iteration to sum up to element value)
+    for (int t = 0; t < tilesAmount; ++t) {
         // Load elements of A and B into shared memory
-        const int colTileElementIndex = t * TILE_WIDTH + threadIdx.x; // each thread process one column element of the tile from matrix A
-        if (row < MAT_DIM_N && (colTileElementIndex) < MAT_DIM_M) {
-            sharedMatA[threadIdx.y][threadIdx.x] = pMatA[row * MAT_DIM_M + colTileElementIndex]; 
+        const int elementTileAIndex = t * TILE_WIDTH + threadIdx.x; // each thread process one element of the tile from matrix A
+        if (row < matDimN && (elementTileAIndex) < matDimM) {
+            sharedMatA[threadIdx.y][threadIdx.x] = pMatA[row * matDimM + elementTileAIndex]; 
         } else {
             sharedMatA[threadIdx.y][threadIdx.x] = 0.0f; // Padding for out of bounds threads
         }
 
-        const int rowTileElementIndex = t * TILE_WIDTH + threadIdx.y; // each thread process one row element of the tile from matrix B
-        if (col < MAT_DIM_K && rowTileElementIndex < MAT_DIM_M) {
-            sharedMatB[threadIdx.y][threadIdx.x] = pMatB[rowTileElementIndex * MAT_DIM_K + col];
+        const int elementTileBIndex = t * TILE_WIDTH + threadIdx.y; // each thread process one element of the tile from matrix B
+        if (col < matDimK && elementTileBIndex < matDimM) {
+            sharedMatB[threadIdx.y][threadIdx.x] = pMatB[elementTileBIndex * matDimK + col];
         } else {
             sharedMatB[threadIdx.y][threadIdx.x] = 0.0f; // Padding for out of bounds threads
         }
@@ -270,28 +257,17 @@ __global__ void matMulTiledKernel(float* pMatA, float* pMatB, float* pMatRes, in
     }
 
     // Write the result back to the output matrix C
-    if (row < MAT_DIM_N && col < MAT_DIM_K) {
-        pMatRes[row * MAT_DIM_K + col] = elementValue;
+    if (row < matDimN && col < matDimK) {
+        pMatRes[row * matDimK + col] = elementValue;
     }
 }
 
-void transposeMat(float* pDevMatB, float* pDevMatB_T)
-{
-    const auto startTimePoint = std::chrono::high_resolution_clock::now();
-    transposeKernel<<<BLOCKS_PER_GRID, THREADS_PER_BLOCK>>>(pDevMatB, pDevMatB_T, MAT_DIM_M, MAT_DIM_K);
-
-    cudaDeviceSynchronize();
-    const auto endTimePoint = std::chrono::high_resolution_clock::now();
-
-    const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTimePoint - startTimePoint);
-    std::cout << "Transpose matrix B time: " << duration.count() << " ms.\n";
-}
-
-
 void matMulCuda(float* pDevMatA, float* pDevMatB, float* pDevMatRes, float* pMatRes)
 {
+    std::cout << "===== GPU Matrix Multiplication =====\n";
+
     const auto startTimePoint = std::chrono::high_resolution_clock::now();
-    matMulTiledKernel<<<BLOCKS_PER_GRID, THREADS_PER_BLOCK>>>(pDevMatA, pDevMatB, pDevMatRes, MAT_DIM_N, MAT_DIM_M, MAT_DIM_K);
+    matMulTiledKernel<<<CUDA_BLOCKS_PER_GRID, CUDA_THREADS_PER_BLOCK>>>(pDevMatA, pDevMatB, pDevMatRes, MAT_DIM_N, MAT_DIM_M, MAT_DIM_K, TILES_AMOUNT);
 
     // Check for any errors launching the kernel
     cudaError_t cudaStatus = cudaGetLastError();

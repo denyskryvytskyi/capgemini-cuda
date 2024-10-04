@@ -1,4 +1,11 @@
-﻿#include "cuda_runtime.h"
+﻿/**
+ * TASK: Addition of two vectors
+ * RESULTS: (For vectors with the size = 100'000'000 with -O3 compilation flag)
+ *  - CPU addition: ~110 ms
+ *  - GPU addition: ~13 ms
+ */
+
+#include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
 #include <malloc.h>
@@ -11,22 +18,14 @@ constexpr float VEC_A_OFFSET = 0.2f;
 constexpr float VEC_B_OFFSET = 1.3f;
 constexpr bool PRINT_VEC = false;
 
-constexpr int CUDA_BLOCK_SIZE = 512;       // amount of threads per threads block
-constexpr int CUDA_NUM_BLOCKS = (VEC_SIZE + CUDA_BLOCK_SIZE - 1) / CUDA_BLOCK_SIZE; // amount of thread block
+constexpr int32_t CUDA_BLOCK_SIZE = 512;                                                     // amount of threads per threads block
+constexpr int32_t CUDA_BLOCKS_PER_GRID = (VEC_SIZE + CUDA_BLOCK_SIZE - 1) / CUDA_BLOCK_SIZE; // amount of thread block
 
 void printVec(float* pVec);
 void initData(float* pVecA, float* pVecB);
+void cleanup(float* pVecA, float* pVecB, float* pVecRes, float* pDevVecA, float* pDevVecB, float* pDevVecRes);
 void add(float* pVecA, float* pVecB, float* pVecRes);
 void addWithCuda(float* pDevVecA, float* pDevVecB, float* pDevVecRes, float* pVecRes);
-
-__global__ void addKernel(float* pVecA, float* pVecB, float* pVecRes)
-{
-    int index = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = blockDim.x * gridDim.x;
-    for (int i = index; i < VEC_SIZE; i += stride)
-        pVecRes[i] = pVecA[i] + pVecB[i];
-}
-
 
 int main()
 {
@@ -61,6 +60,14 @@ int main()
 
     initData(pVecA, pVecB);
 
+    if (PRINT_VEC) {
+        std::cout << "Vector A: ";
+        printVec(pVecA);
+        
+        std::cout << "Vector B: ";
+        printVec(pVecB);
+    }
+
     add(pVecA, pVecB, pVecRes);    // CPU addition
 
     // CUDA buffers
@@ -72,21 +79,21 @@ int main()
     cudaError_t cudaStatus = cudaMalloc(&pDevVecA, VEC_SIZE * sizeof(float));
     if (cudaStatus != cudaSuccess) {
         std::cout << "cudaMalloc failed for vector A!\n";
+        cleanup(pVecA, pVecB, pVecRes, pDevVecA, pDevVecB, pDevVecRes);
         return 1;
     }
 
     cudaStatus = cudaMalloc(&pDevVecB, VEC_SIZE * sizeof(float));
     if (cudaStatus != cudaSuccess) {
         std::cout << "cudaMalloc failed for vector B!\n";
-        cudaFree(pDevVecA);
+        cleanup(pVecA, pVecB, pVecRes, pDevVecA, pDevVecB, pDevVecRes);
         return 1;
     }
 
     cudaStatus = cudaMalloc(&pDevVecRes, VEC_SIZE * sizeof(float));
     if (cudaStatus != cudaSuccess) {
         std::cout << "cudaMalloc failed for result vector!\n";
-        cudaFree(pDevVecA);
-        cudaFree(pDevVecB);
+        cleanup(pVecA, pVecB, pVecRes, pDevVecA, pDevVecB, pDevVecRes);
         return 1;
     }
 
@@ -94,22 +101,20 @@ int main()
     cudaStatus = cudaMemcpy(pDevVecA, pVecA, VEC_SIZE * sizeof(float), cudaMemcpyHostToDevice);
     if (cudaStatus != cudaSuccess) {
         std::cout << "cudaMemcpy failed for vector A!\n";
+        cleanup(pVecA, pVecB, pVecRes, pDevVecA, pDevVecB, pDevVecRes);
+        return 1;
     }
 
     cudaStatus = cudaMemcpy(pDevVecB, pVecB, VEC_SIZE * sizeof(float), cudaMemcpyHostToDevice);
     if (cudaStatus != cudaSuccess) {
         std::cout << "cudaMemcpy failed for vector B!\n";
+        cleanup(pVecA, pVecB, pVecRes, pDevVecA, pDevVecB, pDevVecRes);
+        return 1;
     }
 
     addWithCuda(pDevVecA, pDevVecB, pDevVecRes, pVecRes);
 
-    cudaFree(pDevVecRes);
-    cudaFree(pDevVecB);
-    cudaFree(pDevVecA);
-
-    _aligned_free(pVecRes);
-    _aligned_free(pVecB);
-    _aligned_free(pVecA);
+    cleanup(pVecA, pVecB, pVecRes, pDevVecA, pDevVecB, pDevVecRes);
 
     return 0;
 }
@@ -131,8 +136,21 @@ void initData(float* pVecA, float* pVecB)
     }
 }
 
+void cleanup(float* pVecA, float* pVecB, float* pVecRes, float* pDevVecA, float* pDevVecB, float* pDevVecRes)
+{
+    cudaFree(pDevVecRes);
+    cudaFree(pDevVecB);
+    cudaFree(pDevVecA);
+
+    _aligned_free(pVecRes);
+    _aligned_free(pVecB);
+    _aligned_free(pVecA);
+}
+
 void add(float* pVecA, float* pVecB, float* pVecRes)
 {
+    std::cout << "===== CPU Addition =====\n";
+
     const auto startTimePoint = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < VEC_SIZE; ++i) {
         pVecRes[i] = pVecA[i] + pVecB[i];
@@ -140,7 +158,7 @@ void add(float* pVecA, float* pVecB, float* pVecRes)
     const auto endTimePoint = std::chrono::high_resolution_clock::now();
 
     if (PRINT_VEC) {
-        std::cout << "Result of A + B: ";
+        std::cout << "A + B: ";
         printVec(pVecRes);
     }
 
@@ -148,13 +166,20 @@ void add(float* pVecA, float* pVecB, float* pVecRes)
     std::cout << "Execution time: " << duration.count() << " ms.\n";
 }
 
+__global__ void addKernel(float* pVecA, float* pVecB, float* pVecRes)
+{
+    const int index = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = blockDim.x * gridDim.x;
+    for (int i = index; i < VEC_SIZE; i += stride)
+        pVecRes[i] = pVecA[i] + pVecB[i];
+}
 
-// Helper function for using CUDA to add vectors in parallel.
 void addWithCuda(float* pDevVecA, float* pDevVecB, float* pDevVecRes, float* pVecRes)
 {
+    std::cout << "===== GPU Addition =====\n";
+
     const auto startTimePoint = std::chrono::high_resolution_clock::now();
-    // Launch a kernel on the GPU with one thread for each element
-    addKernel<<<CUDA_NUM_BLOCKS, CUDA_BLOCK_SIZE>>>(pDevVecA, pDevVecB, pDevVecRes);
+    addKernel<<<CUDA_BLOCKS_PER_GRID, CUDA_BLOCK_SIZE>>>(pDevVecA, pDevVecB, pDevVecRes);
 
     // Check for any errors launching the kernel
     cudaError_t cudaStatus = cudaGetLastError();
@@ -181,6 +206,7 @@ void addWithCuda(float* pDevVecA, float* pDevVecB, float* pDevVecRes, float* pVe
     }
 
     if (PRINT_VEC) {
+        std::cout << "A + B: ";
         printVec(pVecRes);
     }
 
