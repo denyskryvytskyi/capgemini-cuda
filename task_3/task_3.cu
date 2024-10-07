@@ -2,18 +2,10 @@
  * TASK: Reduction Operations Using CUDA
  * NOTE: Implemented and tested on Windows 10 with NVIDIA GTX 1050 (laptop) card
  * RESULTS: (For array with the size = 100'000'000)
- *  - CPU reduction:  ms
- *  - GPU reduction: ~ ms
- *  - GPU data preparation overhead (allocation and host to device copy): ~ms
- * 
- * Tests (100'000'000):
- * reduce1: ~45 ms
- * reduce2: ~23.5 ms
- * reduce3: ~18 ms
- * reduce4: ~9 ms
- * reduce4: ~5.8 ms
+ *  - CPU reduction: ~125 ms
+ *  - GPU reduction: ~5.8 ms
+ *  - GPU data preparation overhead (allocation and host to device copy): ~580 ms
  */
-
 
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
@@ -22,15 +14,13 @@
 #include <iostream>
 #include <malloc.h>
 
-//constexpr int32_t ARR_SIZE = 100'000'000'000;
 constexpr int32_t ARR_SIZE = 100'000'000;
 constexpr int32_t ALIGNMENT = 16;
-constexpr float OFFSET = 1.0f;
 constexpr bool PRINT_ARR = false;
 
 // CUDA specific
-constexpr int32_t CUDA_BLOCK_SIZE = 128; // amount of threads per thread block(
-constexpr int32_t CUDA_GRID_SIZE = ((ARR_SIZE / 2 + CUDA_BLOCK_SIZE - 1) / CUDA_BLOCK_SIZE); // amount of thread blocks per grid
+constexpr int32_t CUDA_BLOCK_SIZE = 128; // Amount of threads per thread block(
+constexpr int32_t CUDA_GRID_SIZE = ((ARR_SIZE / 2 + CUDA_BLOCK_SIZE - 1) / CUDA_BLOCK_SIZE); // Amount of thread blocks per grid
 
 // Helpers
 void printArr(float* pArr);
@@ -62,7 +52,7 @@ int main()
         printArr(pArr);
     }
 
-    reduce(pArr); // CPU addition
+    reduce(pArr);
 
     // Partial reduction output array after parallel execution on GPU
     float* pArrOut = static_cast<float*>(_aligned_malloc(CUDA_GRID_SIZE * sizeof(float), ALIGNMENT));
@@ -75,7 +65,6 @@ int main()
     // GPU buffers
     float* pDevArr = nullptr; 
     float* pDevArrOut = nullptr; 
-
 
     const auto startTimePoint = std::chrono::high_resolution_clock::now();
     // Allocate GPU buffer for array
@@ -151,91 +140,7 @@ void reduce(float* pArr)
     std::cout << "Execution time: " << duration.count() << " ms.\n";
 }
 
-__global__ void reduceKernel1(float* pArr, float* pArrOut)
-{
-    extern __shared__ float sdata[];
-
-    unsigned int tid = threadIdx.x;
-    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
-    sdata[tid] = pArr[i];
-    __syncthreads();
-
-    for (size_t s = 1; s < blockDim.x; s *= 2) {
-        if (tid % (2 * s) == 0) {
-            sdata[tid] += sdata[tid + s];
-        }
-        __syncthreads();
-    }
-
-    if (tid == 0) {
-        pArrOut[blockIdx.x] = sdata[0];
-    }
-}
-
-__global__ void reduceKernel2(float* pArr, float* pArrOut)
-{
-    extern __shared__ float sdata[];
-
-    unsigned int tid = threadIdx.x;
-    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
-    sdata[tid] = pArr[i];
-    __syncthreads();
-
-    for (size_t s = 1; s < blockDim.x; s *= 2) {
-        int index = 2 * s * tid;
-        if (index < blockDim.x) {
-            sdata[index] += sdata[index + s];
-        }
-        __syncthreads();
-    }
-
-    if (tid == 0) {
-        pArrOut[blockIdx.x] = sdata[0];
-    }
-}
-
-__global__ void reduceKernel3(float* pArr, float* pArrOut)
-{
-    extern __shared__ float sdata[];
-
-    unsigned int tid = threadIdx.x;
-    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
-    sdata[tid] = pArr[i];
-    __syncthreads();
-
-    for (size_t s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            sdata[tid] += sdata[tid + s];
-        }
-        __syncthreads();
-    }
-
-    if (tid == 0) {
-        pArrOut[blockIdx.x] = sdata[0];
-    }
-}
-
-__global__ void reduceKernel4(float* pArr, float* pArrOut)
-{
-    extern __shared__ float sdata[];
-
-    unsigned int tid = threadIdx.x;
-    unsigned int i = blockIdx.x * (blockDim.x * 2) + threadIdx.x;
-    sdata[tid] = pArr[i] + pArr[i + blockDim.x];
-    __syncthreads();
-
-    for (size_t s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            sdata[tid] += sdata[tid + s];
-        }
-        __syncthreads();
-    }
-
-    if (tid == 0) {
-        pArrOut[blockIdx.x] = sdata[0];
-    }
-}
-
+// Last warp unrolling
 __device__ void warpReduce(volatile float* sdata, int tid)
 {
     sdata[tid] += sdata[tid + 32];
@@ -246,40 +151,50 @@ __device__ void warpReduce(volatile float* sdata, int tid)
     sdata[tid] += sdata[tid + 1];
 }
 
-__global__ void reduceKernel5(float* pArr, float* pArrOut)
+/**
+* Main kernel for reduction operation.
+* We make the first add while loading to the shared memory,
+* that's why the final thread blocks amount (CUDA_GRID_SIZE) is divided by 2.
+* Then we make a tree-based sum up per thread block.
+* For the final warp we make warp unrolling for the final result.
+*/
+__global__ void reduceKernel(float* pArr, float* pArrOut)
 {
-    extern __shared__ float sdata[];
+    extern __shared__ float sdata[];                                // Shared data accessible by all threads in a thread block
 
     unsigned int tid = threadIdx.x;
-    unsigned int i = blockIdx.x * (blockDim.x * 2) + threadIdx.x;
-    sdata[tid] = pArr[i] + pArr[i + blockDim.x];
-    __syncthreads();
+    unsigned int i = blockIdx.x * (blockDim.x * 2) + threadIdx.x;   // Index of the processing element from the array
+    sdata[tid] = pArr[i] + pArr[i + blockDim.x];                    // Make first add while loading to shared data
+    __syncthreads();                                                // Wait till all threads in the block finish loading to shared data
 
-    for (size_t s = blockDim.x / 2; s > 32; s >>= 1) {
+    // Tree-based sum up
+    for (unsigned int s = blockDim.x / 2; s > 32; s >>= 1) {
+        // Threads in block sequentially access elements and sum up with elements by stride
         if (tid < s) {
             sdata[tid] += sdata[tid + s];
         }
-        __syncthreads();
+        __syncthreads();    // Wait till all threads in block finish instructions
     }
 
+    // For the last warp we don't need (tid < s) check and sync because all threads in warp process simultaneously
     if (tid < 32) {
         warpReduce(sdata, tid);
     }
 
     if (tid == 0) {
-        pArrOut[blockIdx.x] = sdata[0];
+        pArrOut[blockIdx.x] = sdata[0]; // Final sum of the elements in thread block are in the first element of the sdata
     }
 }
 
 void reduceWithCuda(float* pDevArr, float* pDevArrOut, float* pArrOut)
 {
-    cudaEvent_t startKernelEvent, stopKernelEvent; // events to measure kernel execution time
+    cudaEvent_t startKernelEvent, stopKernelEvent; // Events to measure kernel execution time
     cudaEventCreate(&startKernelEvent);
     cudaEventCreate(&stopKernelEvent);
 
     cudaEventRecord(startKernelEvent, 0);
 
-    reduceKernel5<<<CUDA_GRID_SIZE, CUDA_BLOCK_SIZE, CUDA_BLOCK_SIZE * sizeof(float)>>>(pDevArr, pDevArrOut);
+    reduceKernel<<<CUDA_GRID_SIZE, CUDA_BLOCK_SIZE, CUDA_BLOCK_SIZE * sizeof(float)>>>(pDevArr, pDevArrOut);
 
     // Check for any errors launching the kernel
     cudaError_t cudaStatus = cudaGetLastError();
