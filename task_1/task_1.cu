@@ -7,8 +7,8 @@
  *  - GPU data preparation overhead (allocation and host to device copy): ~700ms
  */
 
-#include "cuda_runtime.h"
-#include "device_launch_parameters.h"
+#include <cuda_runtime.h>
+#include <device_launch_parameters.h>
 
 #include <malloc.h>
 #include <iostream>
