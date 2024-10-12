@@ -1,10 +1,14 @@
 /**
  * TASK: Sorting with Thrust
  * NOTE: Implemented and tested on Windows 10 with NVIDIA GTX 1050 (laptop) card
- * RESULTS: ()
+ * RESULTS: (Array with size 100'000'000 and element value range [-100;100])
+ * Windows results (my laptop with Nvidia GTX 1050 and Intel Core i7-7700HQ):
  *  - CPU sort: ~2880 ms
- *  - GPU (Thrust) sort: ~133 ms
- */
+ *  - GPU (Thrust) sort: ~133 ms (x21 faster)
+ * Linux results (this PC with Nvidia Tesla m60 and Intel Xeon CPU E5-2686):
+ *  - CPU sort: ~4600 ms
+ *  - GPU (Thrust) sort: ~88 ms (x52 faster)
+ **/
 
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>

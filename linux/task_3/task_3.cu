@@ -2,10 +2,19 @@
  * TASK: Reduction Operations Using CUDA
  * NOTE: Implemented and tested on Windows 10 with NVIDIA GTX 1050 (laptop) card
  * RESULTS: (For array with the size = 100'000'000)
+ * Windows results (my laptop with Nvidia GTX 1050 and Intel Core i7-7700HQ):
  *  - CPU reduction: ~125 ms
  *  - GPU reduction: ~5.8 ms
+ *      - CPU final computation time based on GPU computation results: ~1 ms
+ *      - Overall results: ~6.8 ms (x18 faster)
  *  - GPU data preparation overhead (allocation and host to device copy): ~580 ms
- */
+ * Linux results (this PC with Nvidia Tesla m60 and Intel Xeon CPU E5-2686):
+ *  - CPU reduction: ~118 ms
+ *  - GPU reduction: ~3.5 ms
+ *      - CPU final computation based on GPU computation results: ~2 ms
+ *      - Overall results: ~5.5 ms (x21 faster)
+ *  - GPU data preparation overhead (allocation and host to device copy): ~174 ms
+ **/
 
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
@@ -39,8 +48,9 @@ int main()
         return 0;
     }
 
-    float* pArr = static_cast<float*>(_aligned_malloc(ARR_SIZE * sizeof(float), ALIGNMENT));
-    if (!pArr) {
+    float* pArr = nullptr;
+
+    if (posix_memalign(reinterpret_cast<void**>(&pArr), ALIGNMENT, ARR_SIZE * sizeof(float)) != 0) {
         std::cerr << "Memory allocation failed for array." << std::endl;
         return 1;
     }
@@ -55,10 +65,10 @@ int main()
     reduce(pArr);
 
     // Partial reduction output array after parallel execution on GPU
-    float* pArrOut = static_cast<float*>(_aligned_malloc(CUDA_GRID_SIZE * sizeof(float), ALIGNMENT));
-    if (!pArrOut) {
+    float* pArrOut = nullptr;
+    if (posix_memalign(reinterpret_cast<void**>(&pArrOut), ALIGNMENT, CUDA_GRID_SIZE * sizeof(float)) != 0) {
         std::cerr << "Memory allocation failed for array." << std::endl;
-        _aligned_free(pArr);
+        free(pArr);
         return 1;
     }
 
@@ -71,7 +81,8 @@ int main()
     cudaError_t cudaStatus = cudaMalloc(&pDevArr, ARR_SIZE * sizeof(float));
     if (cudaStatus != cudaSuccess) {
         std::cout << "cudaMalloc failed!\n";
-        _aligned_free(pArr);
+        free(pArr);
+        free(pArrOut);
         return 1;
     }
     
@@ -79,7 +90,8 @@ int main()
     if (cudaStatus != cudaSuccess) {
         std::cout << "cudaMalloc failed for the output array!\n";
         cudaFree(pDevArr);
-        _aligned_free(pArr);
+        free(pArr);
+        free(pArrOut);
         return 1;
     }
 
@@ -87,7 +99,9 @@ int main()
     cudaStatus = cudaMemcpy(pDevArr, pArr, ARR_SIZE * sizeof(float), cudaMemcpyHostToDevice);
     if (cudaStatus != cudaSuccess) {
         std::cout << "cudaMemcpy failed!\n";
-        _aligned_free(pArr);
+        cudaFree(pDevArr);
+        free(pArr);
+        free(pArrOut);
         return 1;
     }
 
@@ -99,9 +113,10 @@ int main()
 
     reduceWithCuda(pDevArr, pDevArrOut, pArrOut);
 
+    cudaFree(pDevArrOut);
     cudaFree(pDevArr);
-    _aligned_free(pArrOut);
-    _aligned_free(pArr);
+    free(pArrOut);
+    free(pArr);
 
     return 0;
 }
@@ -213,7 +228,6 @@ void reduceWithCuda(float* pDevArr, float* pDevArrOut, float* pArrOut)
 
     // cudaDeviceSynchronize waits for the kernel to finish
     cudaStatus = cudaDeviceSynchronize();
-    const auto endTimePoint = std::chrono::high_resolution_clock::now();
 
     // Any errors encountered during the launch
     if (cudaStatus != cudaSuccess) {
@@ -222,7 +236,7 @@ void reduceWithCuda(float* pDevArr, float* pDevArrOut, float* pArrOut)
     }
 
     // Copy output vector from GPU buffer to host memory
-    const auto fstartTimePoint = std::chrono::high_resolution_clock::now();
+    const auto startTimePoint = std::chrono::high_resolution_clock::now();
     cudaStatus = cudaMemcpy(pArrOut, pDevArrOut, CUDA_GRID_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
     if (cudaStatus != cudaSuccess) {
         std::cout << "cudaMemcpy failed!";
@@ -233,11 +247,11 @@ void reduceWithCuda(float* pDevArr, float* pDevArrOut, float* pArrOut)
     for (int i = 0; i < CUDA_GRID_SIZE; ++i) {
         sum += pArrOut[i];
     }
-    const auto fendTimePoint = std::chrono::high_resolution_clock::now();
+    const auto endTimePoint = std::chrono::high_resolution_clock::now();
 
-    const auto fduration = std::chrono::duration_cast<std::chrono::milliseconds>(fendTimePoint - fstartTimePoint);
+    const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTimePoint - startTimePoint);
 
     std::cout << "Reduction (sum): " << sum << std::endl;
     std::cout << "Execution time (kernel): " << kernelTimeMs << " ms.\n";
-    std::cout << "Execution time (final): " << fduration.count() << " ms.\n";
+    std::cout << "Execution time (final computation): " << duration.count() << " ms.\n";
 }

@@ -2,10 +2,22 @@
  * TASK: Matrix Multiplication Using CUDA
  * NOTE: Implemented and tested on Windows 10 with NVIDIA GTX 1050 (laptop) card
  * RESULTS: (for matrices A(1500; 2000); B(2000; 3000) and result matrix (1500;3000) with -O3 compilation flag)
+ * Windows results (my laptop with Nvidia GTX 1050 and Intel Core i7-7700HQ):
  *  - CPU multiplication: ~4000 ms
- *  - GPU multiplication (simple kernel matMulKernel): ~200 ms (~20 times faster)
- *  - GPU multiplication (tiled matrix kernel matMulTiledKernel): ~87 ms (~45 times faster)
- *  - GPU data preparation (time to allocate GPU buffers and host to device data copy): ~380 ms
+ *  - GPU multiplication (simple kernel matMulKernel): ~200 ms (~x20 faster)
+ *  - GPU multiplication (tiled matrix with shared memory usage kernel matMulTiledKernel): ~80,8 ms (~x45 faster)
+ *  - GPU data preparation (time to allocate GPU buffers and host to device data copy): ~387 ms
+ * Linux results (this PC with Nvidia Tesla m60 and Intel Xeon CPU E5-2686):
+ *  - CPU multiplication: ~31000 ms
+ *  - GPU multiplication (simple kernel matMulKernel): ~143 ms (~x216 faster)
+ *  - GPU multiplication (tiled matrix with shared memory usage kernel matMulTiledKernel): ~62 ms (~x500 faster)
+ *  - GPU data preparation (time to allocate GPU buffers and host to device data copy): ~145 ms
+ *
+ * NOTE:
+ *  I've tried transposed matrix B and the default one.
+ *  Windows: transposed marix B causes kernel execution time to reduce by ~8 ms.
+ *  Linux: seems like transposed matrix B doesn't improve performance.
+ *  Also, the transposition of the shared tile causes worse execution time.
  **/
 
 #include <cuda_runtime.h>
@@ -29,16 +41,18 @@ constexpr bool PRINT_MAT = false;
 // CUDA specific
 constexpr int32_t TILE_WIDTH = 16;                                          // size of the matrix tile 16x16
 constexpr int32_t TILES_AMOUNT = (MAT_DIM_M + TILE_WIDTH - 1) / TILE_WIDTH; // amount of tiles to cover all matrix elements
-const dim3 CUDA_BLOCK_SIZE(TILE_WIDTH, TILE_WIDTH);                         // 256 threads per block. Should have the same dimension as matrix tile for efficient processing
+const dim3 CUDA_BLOCK_SIZE(TILE_WIDTH, TILE_WIDTH);                         // 256 threads per block. Have the same dimension as matrix tile for efficient processing
 const dim3 CUDA_GRID_SIZE((MAT_DIM_K + CUDA_BLOCK_SIZE.x - 1) / CUDA_BLOCK_SIZE.x, (MAT_DIM_N + CUDA_BLOCK_SIZE.y - 1) / CUDA_BLOCK_SIZE.y); // blocks to cover the matrix
 
 // Helpers
 void initData(float* pMatA, float* pMatB, float* pMatRes);
 void resetRes(float* pMatRes);
 void printMat(float* pMat, int32_t rows, int32_t cols);
-void cleanup(float* pMatA, float* pMatB, float* pMatRes, float* pDevMatA, float* pDevMatB, float* pDevMatRes);
+void cleanup(float* pMatA, float* pMatB, float* pMatRes, float* pDevMatA, float* pDevMatB, float* pDevMatRes, float* pDevMatB_T);
+
 void matMul(float* pMatA, float* pMatB, float* pMatRes);
-void matMulCuda(float* pDevMatA, float* pDevMatB, float* pDevMatRes, float* pMatRes);
+void transposeMat(float* pDevMatB, float* pDevMatB_T);
+void matMulCuda(float* pDevMatA, float* pDevMatB_T, float* pDevMatRes, float* pMatRes);
 
 int main()
 {
@@ -50,23 +64,24 @@ int main()
         return 0;
     }
 
-    float* pMatA = static_cast<float*>(_aligned_malloc(MAT_A_SIZE * sizeof(float), ALIGNMENT));
-    if (!pMatA) {
+    float* pMatA = nullptr;
+    float* pMatB = nullptr;
+    float* pMatRes = nullptr;
+
+    if (posix_memalign(reinterpret_cast<void**>(&pMatA), ALIGNMENT, MAT_A_SIZE * sizeof(float)) != 0) {
         std::cerr << "Failed to allocate memory for matrix A." << std::endl;
         return 1;
     }
 
-    float* pMatB = static_cast<float*>(_aligned_malloc(MAT_B_SIZE * sizeof(float), ALIGNMENT));
-    if (!pMatB) {
-        _aligned_free(pMatA);
+    if (posix_memalign(reinterpret_cast<void**>(&pMatB), ALIGNMENT, MAT_B_SIZE * sizeof(float)) != 0) {
+        free(pMatA);
         std::cerr << "Failed to allocate memory for matrix B." << std::endl;
         return 1;
     }
 
-    float* pMatRes = static_cast<float*>(_aligned_malloc(MAT_RES_SIZE * sizeof(float), ALIGNMENT));
-    if (!pMatRes) {
-        _aligned_free(pMatA);
-        _aligned_free(pMatB);
+    if (posix_memalign(reinterpret_cast<void**>(&pMatRes), ALIGNMENT, MAT_RES_SIZE * sizeof(float)) != 0) {
+        free(pMatA);
+        free(pMatB);
         std::cerr << "Failed to allocate memory for result matrix." << std::endl;
         return 1;
     }
@@ -87,47 +102,55 @@ int main()
     std::cout << "===== GPU Matrix Multiplication =====\n";
     resetRes(pMatRes);
 
-    // CUDA buffers
+    // GPU buffers
     float* pDevMatA = nullptr;
     float* pDevMatB = nullptr;
     float* pDevMatRes = nullptr;
+    float* pDevMatB_T = nullptr;
 
     const auto startTimePoint = std::chrono::high_resolution_clock::now();
 
     // Allocate GPU buffers for three vectors
     cudaError_t cudaStatus = cudaMalloc((void**)&pDevMatA, MAT_A_SIZE * sizeof(float));
     if (cudaStatus != cudaSuccess) {
-        std::cout << "cudaMalloc failed for vector A!\n";
-        cleanup(pMatA, pMatB, pMatRes, pDevMatA, pDevMatB, pDevMatRes);
+        std::cout << "cudaMalloc failed for matrix A!\n";
+        cleanup(pMatA, pMatB, pMatRes, pDevMatA, pDevMatB, pDevMatRes, pDevMatB_T);
         return 1;
     }
 
     cudaStatus = cudaMalloc((void**)&pDevMatB, MAT_B_SIZE * sizeof(float));
     if (cudaStatus != cudaSuccess) {
-        std::cout << "cudaMalloc failed for vector B!\n";
-        cleanup(pMatA, pMatB, pMatRes, pDevMatA, pDevMatB, pDevMatRes);
+        std::cout << "cudaMalloc failed for matrix B!\n";
+        cleanup(pMatA, pMatB, pMatRes, pDevMatA, pDevMatB, pDevMatRes, pDevMatB_T);
         return 1;
     }
 
     cudaStatus = cudaMalloc((void**)&pDevMatRes, MAT_RES_SIZE * sizeof(float));
     if (cudaStatus != cudaSuccess) {
-        std::cout << "cudaMalloc failed for result vector!\n";
-        cleanup(pMatA, pMatB, pMatRes, pDevMatA, pDevMatB, pDevMatRes);
+        std::cout << "cudaMalloc failed for result matrix!\n";
+        cleanup(pMatA, pMatB, pMatRes, pDevMatA, pDevMatB, pDevMatRes, pDevMatB_T);
         return 1;
     }
 
-    // Copy input vectors from host memory to GPU buffers
+    cudaStatus = cudaMalloc((void**)&pDevMatB_T, MAT_B_SIZE * sizeof(float));
+    if (cudaStatus != cudaSuccess) {
+        std::cout << "cudaMalloc failed for trantsposed matrix B!\n";
+        cleanup(pMatA, pMatB, pMatRes, pDevMatA, pDevMatB, pDevMatRes, pDevMatB_T);
+        return 1;
+    }
+
+    // Copy input matrices from host memory to GPU buffers
     cudaStatus = cudaMemcpy(pDevMatA, pMatA, MAT_A_SIZE * sizeof(float), cudaMemcpyHostToDevice);
     if (cudaStatus != cudaSuccess) {
-        std::cout << "cudaMemcpy failed for vector A!\n";
-        cleanup(pMatA, pMatB, pMatRes, pDevMatA, pDevMatB, pDevMatRes);
+        std::cout << "cudaMemcpy failed for matrix A!\n";
+        cleanup(pMatA, pMatB, pMatRes, pDevMatA, pDevMatB, pDevMatRes, pDevMatB_T);
         return 1;
     }
 
     cudaStatus = cudaMemcpy(pDevMatB, pMatB, MAT_B_SIZE * sizeof(float), cudaMemcpyHostToDevice);
     if (cudaStatus != cudaSuccess) {
-        std::cout << "cudaMemcpy failed for vector B!\n";
-        cleanup(pMatA, pMatB, pMatRes, pDevMatA, pDevMatB, pDevMatRes);
+        std::cout << "cudaMemcpy failed for matrix B!\n";
+        cleanup(pMatA, pMatB, pMatRes, pDevMatA, pDevMatB, pDevMatRes, pDevMatB_T);
         return 1;
     }
     const auto endTimePoint = std::chrono::high_resolution_clock::now();
@@ -135,9 +158,10 @@ int main()
     const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTimePoint - startTimePoint);
     std::cout << "GPU data preparation (buffers allocation and host to device data copy) time: " << duration.count() << " ms.\n";
 
-    matMulCuda(pDevMatA, pDevMatB, pDevMatRes, pMatRes);
+    transposeMat(pDevMatB, pDevMatB_T);
+    matMulCuda(pDevMatA, pDevMatB_T, pDevMatRes, pMatRes);
 
-    cleanup(pMatA, pMatB, pMatRes, pDevMatA, pDevMatB, pDevMatRes);
+    cleanup(pMatA, pMatB, pMatRes, pDevMatA, pDevMatB, pDevMatRes, pDevMatB_T);
 
     return 0;
 }
@@ -169,14 +193,15 @@ void printMat(float* pMat, int32_t rows, int32_t cols)
     std::cout << std::endl;
 }
 
-void cleanup(float* pMatA, float* pMatB, float* pMatRes, float* pDevMatA, float* pDevMatB, float* pDevMatRes)
+void cleanup(float* pMatA, float* pMatB, float* pMatRes, float* pDevMatA, float* pDevMatB, float* pDevMatRes, float* pDevMatB_T)
 {
+    cudaFree(pDevMatB_T);
     cudaFree(pDevMatRes);
     cudaFree(pDevMatB);
     cudaFree(pDevMatA);
-    _aligned_free(pMatRes);
-    _aligned_free(pMatB);
-    _aligned_free(pMatA);
+    free(pMatRes);
+    free(pMatB);
+    free(pMatA);
 }
 
 
@@ -204,6 +229,55 @@ void matMul(float* pMatA, float* pMatB, float* pMatRes)
     std::cout << "Execution time: " << duration.count() << " ms.\n";
 }
 
+__global__ void transposeKernel(float* B, float* B_T, int MAT_DIM_M, int MAT_DIM_K)
+{
+    const int row = blockIdx.x * blockDim.x + threadIdx.x;
+    const int col = blockIdx.y * blockDim.y + threadIdx.y;
+    if (row < MAT_DIM_M && col < MAT_DIM_K) {
+        B_T[col * MAT_DIM_M + row] = B[row * MAT_DIM_K + col];
+    }
+}
+
+void transposeMat(float* pDevMatB, float* pDevMatB_T)
+{
+    cudaEvent_t startKernelEvent, stopKernelEvent; // events to measure kernel execution time
+    cudaEventCreate(&startKernelEvent);
+    cudaEventCreate(&stopKernelEvent);
+
+    cudaEventRecord(startKernelEvent, 0);
+
+    transposeKernel<<<CUDA_GRID_SIZE, CUDA_BLOCK_SIZE>>>(pDevMatB, pDevMatB_T, MAT_DIM_M, MAT_DIM_K);
+
+    // Check for any errors launching the kernel
+    cudaError_t cudaStatus = cudaGetLastError();
+    if (cudaStatus != cudaSuccess) {
+        std::cout << "matMulKernel launch failed:" << cudaGetErrorString(cudaStatus) << std::endl;
+        return;
+    }
+
+    cudaEventRecord(stopKernelEvent, 0);
+    cudaEventSynchronize(stopKernelEvent);
+
+    float kernelTimeMs = 0.0f;
+    cudaEventElapsedTime(&kernelTimeMs, startKernelEvent, stopKernelEvent);
+    cudaEventDestroy(startKernelEvent);
+    cudaEventDestroy(stopKernelEvent);
+
+    cudaDeviceSynchronize();
+
+
+    cudaStatus = cudaDeviceSynchronize();
+
+    // Any errors encountered during the launch
+    if (cudaStatus != cudaSuccess) {
+        std::cout << "cudaDeviceSynchronize returned error code" << cudaStatus << std::endl;
+        return;
+    }
+
+    std::cout << "Transpose matrix B kernel execution time: " << kernelTimeMs << " ms.\n";
+}
+
+// Simple kernel to multiply matrices
 __global__ void matMulKernel(float* pMatA, float* pMatB, float* pMatRes, int matDimN, int matDimM, int matDimK)
 {
     const int row = blockIdx.y * blockDim.y + threadIdx.y;
@@ -218,7 +292,8 @@ __global__ void matMulKernel(float* pMatA, float* pMatB, float* pMatRes, int mat
     }
 }
 
-__global__ void matMulTiledKernel(float* pMatA, float* pMatB, float* pMatRes, int matDimN, int matDimM, int matDimK, int tilesAmount)
+// Kernel with shared memory usage and matrix division on tiles
+__global__ void matMulTiledKernel(float* pMatA, float* pMatB_T, float* pMatRes, int matDimN, int matDimM, int matDimK, int tilesAmount)
 {
     // Allocate shared memory for sub-matrices A and B tiles for faster access
     // Shared for all threads in one thread block
@@ -245,7 +320,7 @@ __global__ void matMulTiledKernel(float* pMatA, float* pMatB, float* pMatRes, in
 
         const int elementTileBIndex = t * TILE_WIDTH + threadIdx.y; // each thread process one element of the tile from matrix B
         if (col < matDimK && elementTileBIndex < matDimM) {
-            sharedMatB[threadIdx.y][threadIdx.x] = pMatB[elementTileBIndex * matDimK + col];
+            sharedMatB[threadIdx.y][threadIdx.x] = pMatB_T[col * matDimM + elementTileBIndex];
         } else {
             sharedMatB[threadIdx.y][threadIdx.x] = 0.0f; // Padding for out of bounds threads
         }
@@ -268,14 +343,14 @@ __global__ void matMulTiledKernel(float* pMatA, float* pMatB, float* pMatRes, in
     }
 }
 
-void matMulCuda(float* pDevMatA, float* pDevMatB, float* pDevMatRes, float* pMatRes)
+void matMulCuda(float* pDevMatA, float* pDevMatB_T, float* pDevMatRes, float* pMatRes)
 {
     cudaEvent_t startKernelEvent, stopKernelEvent; // events to measure kernel execution time
     cudaEventCreate(&startKernelEvent);
     cudaEventCreate(&stopKernelEvent);
 
     cudaEventRecord(startKernelEvent, 0);
-    matMulTiledKernel<<<CUDA_GRID_SIZE, CUDA_BLOCK_SIZE>>>(pDevMatA, pDevMatB, pDevMatRes, MAT_DIM_N, MAT_DIM_M, MAT_DIM_K, TILES_AMOUNT);
+    matMulTiledKernel<<<CUDA_GRID_SIZE, CUDA_BLOCK_SIZE>>>(pDevMatA, pDevMatB_T, pDevMatRes, MAT_DIM_N, MAT_DIM_M, MAT_DIM_K, TILES_AMOUNT);
 
     // Check for any errors launching the kernel
     cudaError_t cudaStatus = cudaGetLastError();

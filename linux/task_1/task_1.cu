@@ -1,11 +1,16 @@
-﻿/**
+/**
  * TASK: Addition of two vectors
  * NOTE: Implemented and tested on Windows 10 with NVIDIA GTX 1050 (laptop) card
  * RESULTS: (For vectors with the size = 100'000'000 with -O3 compilation flag)
+ * Windows results (my laptop with Nvidia GTX 1050 and Intel Core i7-7700HQ):
  *  - CPU addition: ~113 ms
  *  - GPU addition: ~12 ms
- *  - GPU data preparation overhead (allocation and host to device copy): ~700ms
- */
+ *  - GPU data preparation overhead (allocation and host to device copy): ~700 ms
+ * Linux results (this PC with Nvidia Tesla m60 and Intel Xeon CPU E5-2686):
+ *  - CPU addition: ~300 ms
+ *  - GPU addition: ~9.8 ms
+ *  - GPU data preparation overhead (allocation and host to device copy): ~225 ms
+ **/
 
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
@@ -41,23 +46,22 @@ int main()
         return 0;
     }
 
-    float* pVecA = static_cast<float*>(_aligned_malloc(VEC_SIZE * sizeof(float), ALIGNMENT));
-    if (!pVecA) {
+    float* pVecA = nullptr;
+    float* pVecB = nullptr;
+    float* pVecRes = nullptr;
+
+    if (posix_memalign(reinterpret_cast<void**>(&pVecA), ALIGNMENT, VEC_SIZE * sizeof(float)) != 0) {
         std::cerr << "Memory allocation failed for vector A." << std::endl;
         return 1;
     }
-    
-    float* pVecB = static_cast<float*>(_aligned_malloc(VEC_SIZE * sizeof(float), ALIGNMENT));
-    if (!pVecB) {
-        _aligned_free(pVecA);
+    if (posix_memalign(reinterpret_cast<void**>(&pVecB), ALIGNMENT, VEC_SIZE * sizeof(float)) != 0) {
+        free(pVecA);
         std::cerr << "Memory allocation failed for vector B." << std::endl;
         return 1;
     }
-    
-    float* pVecRes = static_cast<float*>(_aligned_malloc(VEC_SIZE * sizeof(float), ALIGNMENT));
-    if (!pVecRes) {
-        _aligned_free(pVecA);
-        _aligned_free(pVecB);
+    if (posix_memalign(reinterpret_cast<void**>(&pVecRes), ALIGNMENT, VEC_SIZE * sizeof(float)) != 0) {
+        free(pVecA);
+        free(pVecB);
         std::cerr << "Memory allocation failed for vector B." << std::endl;
         return 1;
     }
@@ -153,9 +157,9 @@ void cleanup(float* pVecA, float* pVecB, float* pVecRes, float* pDevVecA, float*
     cudaFree(pDevVecB);
     cudaFree(pDevVecA);
 
-    _aligned_free(pVecRes);
-    _aligned_free(pVecB);
-    _aligned_free(pVecA);
+    free(pVecRes);
+    free(pVecB);
+    free(pVecA);
 }
 
 void add(float* pVecA, float* pVecB, float* pVecRes)
