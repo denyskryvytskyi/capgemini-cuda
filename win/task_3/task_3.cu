@@ -11,7 +11,7 @@
  * Linux results (this PC with Nvidia Tesla m60 and Intel Xeon CPU E5-2686):
  *  - CPU reduction: ~118 ms
  *  - GPU reduction: ~3.5 ms
- *      - CPU final computation based on GPU computation results: ~2 ms
+ *      - CPU final computation based on GPU computation results: ~1 ms
  *      - Overall results: ~5.5 ms (x21 faster)
  *  - GPU data preparation overhead (allocation and host to device copy): ~174 ms
  **/
@@ -30,6 +30,7 @@ constexpr bool PRINT_ARR = false;
 // CUDA specific
 constexpr int32_t CUDA_BLOCK_SIZE = 128; // Amount of threads per thread block(
 constexpr int32_t CUDA_GRID_SIZE = ((ARR_SIZE / 2 + CUDA_BLOCK_SIZE - 1) / CUDA_BLOCK_SIZE); // Amount of thread blocks per grid
+constexpr int32_t CUDA_WARP_SIZE = 32;
 
 // Helpers
 void printArr(float* pArr);
@@ -177,7 +178,7 @@ __global__ void reduceKernel(float* pArr, float* pArrOut)
     __syncthreads();                                                // Wait till all threads in the block finish loading to shared data
 
     // Tree-based sum up
-    for (unsigned int s = blockDim.x / 2; s > 32; s >>= 1) {
+    for (unsigned int s = blockDim.x / 2; s > CUDA_WARP_SIZE; s >>= 1) {
         // Threads in block sequentially access elements and sum up with elements by stride
         if (tid < s) {
             sdata[tid] += sdata[tid + s];
@@ -186,7 +187,7 @@ __global__ void reduceKernel(float* pArr, float* pArrOut)
     }
 
     // For the last warp we don't need (tid < s) check and sync because all threads in warp process simultaneously
-    if (tid < 32) {
+    if (tid < CUDA_WARP_SIZE) {
         warpReduce(sdata, tid);
     }
 
