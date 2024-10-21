@@ -23,6 +23,9 @@
 #include <iostream>
 #include <malloc.h>
 
+#include <thrust/device_vector.h>
+#include <thrust/reduce.h>
+
 constexpr int32_t ARR_SIZE = 100'000'000;
 constexpr int32_t ALIGNMENT = 16;
 constexpr bool PRINT_ARR = false;
@@ -116,6 +119,20 @@ int main()
 
     cudaFree(pDevArrOut);
     cudaFree(pDevArr);
+
+    // Perform sum reduction using Thrust library
+    thrust::device_vector<float> dVec(pArr, pArr + ARR_SIZE);
+
+    const auto tstartTimePoint = std::chrono::high_resolution_clock::now();
+    const float sum = thrust::reduce(dVec.begin(), dVec.end(), 0.0f, thrust::plus<float>());
+    const auto tendTimePoint = std::chrono::high_resolution_clock::now();
+    const auto tduration = std::chrono::duration_cast<std::chrono::milliseconds>(tendTimePoint - tstartTimePoint);
+
+    // Print the result
+    std::cout << "===== Thrust library reduction =====\n";
+    std::cout << "Sum: " << sum << std::endl;
+    std::cout << "Execution timeT: " << tduration.count() << " ms.\n";
+
     free(pArrOut);
     free(pArr);
 
@@ -180,7 +197,17 @@ __global__ void reduceKernel(float* pArr, float* pArrOut)
 
     unsigned int tid = threadIdx.x;
     unsigned int i = blockIdx.x * (blockDim.x * 2) + threadIdx.x;   // Index of the processing element from the array
-    sdata[tid] = pArr[i] + pArr[i + blockDim.x];                    // Make first add while loading to shared data
+    
+    // Check bounds
+    if (i < ARR_SIZE) {
+        sdata[tid] = pArr[i];  // Load the first element
+        if (i + blockDim.x < ARR_SIZE) {
+            sdata[tid] += pArr[i + blockDim.x];  // Make first add while loading to shared data
+        }
+    } else {
+        return;
+    }
+
     __syncthreads();                                                // Wait till all threads in the block finish loading to shared data
 
     // Tree-based sum up

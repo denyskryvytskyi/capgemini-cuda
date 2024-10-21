@@ -17,7 +17,7 @@
  *  I've tried transposed matrix B and the default one.
  *  Windows: transposed marix B causes kernel execution time to reduce by ~8 ms.
  *  Linux: seems like transposed matrix B doesn't improve performance.
- *  Also, the transposition of the shared tile causes worse execution time.
+ *  Also, the transposition of the shared tile causes worse execution time (I think because of bank conflict).
  **/
 
 #include <cuda_runtime.h>

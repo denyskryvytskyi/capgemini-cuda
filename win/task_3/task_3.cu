@@ -174,7 +174,17 @@ __global__ void reduceKernel(float* pArr, float* pArrOut)
 
     unsigned int tid = threadIdx.x;
     unsigned int i = blockIdx.x * (blockDim.x * 2) + threadIdx.x;   // Index of the processing element from the array
-    sdata[tid] = pArr[i] + pArr[i + blockDim.x];                    // Make first add while loading to shared data
+    
+    // Check bounds
+    if (i < ARR_SIZE) {
+        sdata[tid] = pArr[i];  // Load the first element
+        if (i + blockDim.x < ARR_SIZE) {
+            sdata[tid] += pArr[i + blockDim.x];  // Make first add while loading to shared data
+        }
+    } else {
+        return;
+    }
+
     __syncthreads();                                                // Wait till all threads in the block finish loading to shared data
 
     // Tree-based sum up
