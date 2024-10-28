@@ -3,7 +3,7 @@ Tasks were implemented and tested in Windows 10 with the Visual Studio CUDA Inte
 
 Tasks list:
 - vectors addition;
-- matrix multiplication: with tiled shared memory usage and matrix transposition;
+- matrix multiplication using tiles, GPU shared memory, and matrix transposition;
 - reduction (sum) with a custom kernel and Nvidia Thrust library for performance comparison;
 - sorting using the Nvidia Thrust library.
 
