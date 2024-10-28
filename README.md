@@ -17,4 +17,4 @@ Compile code using **nvcc** compiler:
 `nvcc <program_name>.cu -o <program_name> -O3`
 
 Run:
-./<program_name>
+`./<program_name>`
