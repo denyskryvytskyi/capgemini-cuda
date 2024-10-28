@@ -8,4 +8,7 @@ Tasks were implemented and tested in Windows 10 with the Visual Studio CUDA Inte
 
 Compile code using **nvcc** compiler:
 
-`nvcc task_<n>.cu -o task_<n> -O3`
+`nvcc <program_name>.cu -o <program_name> -O3`
+
+Run:
+./<program_name>
